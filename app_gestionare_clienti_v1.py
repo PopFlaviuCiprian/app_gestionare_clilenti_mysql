@@ -20,7 +20,7 @@ if not API_KEY:
     raise RuntimeError("API KEY lipsă! Verifică fișierul .env")
 """
 
-API_KEY = "aici pun api key-ul"
+API_KEY = "your api key"
 ADMIN_PASSWORD = "cipri"  # parolă pentru ștergere client din baza de date
 
 
@@ -125,7 +125,7 @@ def resetare_camp_cautare():
 # Funtie pentru modificarea datelor introduse gresit
 """Populează câmpurile cu datele clientului după CUI și punct de lucru pentru editare
 Nu o mai folosesc in cod pentru ca si salvare client face acelasi lucru,
-o pastrez am dezactivat butonul atasat functiei
+o pastrez, am dezactivat butonul atasat functiei
 """
 
 
@@ -238,7 +238,7 @@ def salveaza_client():
     result = cursor.fetchone()
 
     if result:
-        id_client = result[0]
+        id_client = result["Nr_Crt"]
         cursor.execute("""
             UPDATE tabela_date_clienti
             SET Nume_Firma=%s, Sediu_Social=%s, Tva=%s, Administrator=%s,
@@ -293,13 +293,40 @@ def salveaza_client():
     conn.commit()
     conn.close()
 
+"""
+Functie penntru calcularea automata a contractului in functie de situatia clientului
+platitor/neplatitor tva sau deplasare/anual
+"""
+def calculeaza_valoare_contract(tip_abonament, platitor_tva):
+    TVA = 0.21  # Aici modifici cand se schimba tva-ul
+    tip_abonament = tip_abonament.strip().upper()
+    platitor_tva = platitor_tva.strip().upper()
+    valori_baza = {
+        "DEPLASARE-INTERN": 120,
+        "DEPLASARE-EXTERN": 135,
+        "ANUAL": 300
+    }
+    if tip_abonament not in valori_baza:
+        return ""
+    valoare = valori_baza[tip_abonament]
+    if platitor_tva == "DA":
+        valoare *= (1 + TVA)
+    return f"{valoare:.2f}"
+
+# Functie pentru actualizare automata a campului UI
+def actualizeaza_valoare_contract(event=None):
+    tip = entry_tip_abonament.get()
+    tva = entry_tva.get()
+    valoare = calculeaza_valoare_contract(tip, tva)
+    entry_val_ctr.delete(0, tk.END)
+    entry_val_ctr.insert(0, valoare)
+
+
 
 """
 Functie pentru a sterge un client din baza de date 
 ATENTIE: La stergerea unui client se va sterge toate punctele de lucru si casele de marcat ale clientului
 """
-
-
 def sterge_client():
     parola = simpledialog.askstring("Parola Admin", "Introduceți parola pentru ștergere:", show="*")
     if parola != ADMIN_PASSWORD:
@@ -333,8 +360,6 @@ def sterge_client():
 Functie pentru a sterge doar punctul de lucru al clientuluiu, daca se inchide punctul de lucru
 Nu se sterge si clientul din baza de date
 """
-
-
 def sterge_punct():
     parola = simpledialog.askstring("Parola Admin", "Introduceți parola pentru ștergere:", show="*")
     if parola != ADMIN_PASSWORD:
@@ -360,8 +385,6 @@ def sterge_punct():
 Zona de cautare a unui client in baza de date
 Functie pentru cautare client in baza de date, dupa cui, nume, serie casa sau nui
 """
-
-
 def cauta_in_treeview():
     query = search_entry.get().strip().lower()
 
@@ -372,7 +395,6 @@ def cauta_in_treeview():
 
     conn = conectare_db()
     cursor = conn.cursor()
-
     cursor.execute("""
         SELECT 
             d.Nr_Crt,
@@ -410,10 +432,20 @@ def cauta_in_treeview():
                 or query in str(row["Serie_Amef"]).lower()
                 or query in str(row["Nui"]).lower()
         ):
+            # Calculeaza tagurile pentru abonamente
             tag_amef = calculeaza_tag_abonament(row["Data_Exp_Abon"])
             tag_gprs = calculeaza_tag_abonament_gprs(row["Data_Exp_Gprs"])
             tag_final = combina_taguri(tag_amef, tag_gprs)
 
+            # pastram tagurile existente
+            row_tags = [tag_final]
+
+            # Tag special pentru status firma non-activ
+            status = (row["Status_Firma"] or "").strip().lower()
+            if status in ["inchis", "suspendat", "inactiv"]:
+                row_tags.append("status_inactiv") # Culoarea in tree a firmei inactiva
+
+            # inserare rând în Treeview cu tagurile corecte
             tree.insert("", "end", values=(
                 row["Nr_Crt"],
                 row["Nume_Firma"],
@@ -437,8 +469,9 @@ def cauta_in_treeview():
                 row["Data_Exp_Gprs"]
 
             ),
-                        tags=(tag_final,)
+                        tags=tuple(row_tags)
                         )
+            print("STATUS DIN DB =", repr(row["Status_Firma"]))
             found = True  # Am gasit la cautare ceva
     # Daca nu am gasit nimic la cautare afiseaza nu am gait nimic in baza de date
     if not found:
@@ -466,8 +499,6 @@ def combina_taguri(tag_amef, tag_gprs):
 """
 Functie pentru a calcula cat timp mai este pana la expirare
 """
-
-
 def calculeaza_tag_abonament(data_exp):
     if not data_exp:
         return "expirat"
@@ -497,8 +528,6 @@ def calculeaza_tag_abonament_gprs(data_exp):
 """
 Functie de combinare a abonamentelor pentru un singur pop-up
 """
-
-
 def afiseaza_lista_abonamente(parent, rows, tip):
     azi = date.today()
     luna_curenta = azi.month
@@ -517,7 +546,15 @@ def afiseaza_lista_abonamente(parent, rows, tip):
     canvas.configure(yscrollcommand=scrollbar.set)
 
     canvas.pack(side="left", fill="both", expand=True)
+
+    def on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", on_mousewheel))
+    canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
     scrollbar.pack(side="right", fill="y")
+
+    selected_label = {"widget": None, "bg": None}
 
     for r in rows:
         data_exp = r["data_exp"]
@@ -535,7 +572,7 @@ def afiseaza_lista_abonamente(parent, rows, tip):
         if zile_ramase < 0:
             text_status = "EXPIRAT"
             culoare = "#f28c8c"
-        elif data_exp.month == luna_curenta and data_exp.year == anul_curent:
+        elif 0 <= zile_ramase <= 30:
             text_status = f"expiră în {zile_ramase} zile"
             culoare = "#fff3b0"
         else:
@@ -549,21 +586,38 @@ def afiseaza_lista_abonamente(parent, rows, tip):
             f"{descriere} | {data_exp} → {text_status}"
         )
 
-        tk.Label(
+        lbl=tk.Label(
             scroll_frame,
             text=text,
             bg=culoare,
             anchor="w",
             justify="left",
-            font=("Arial", 10)
-        ).pack(fill="x", padx=5, pady=2)
+            font=("Arial", 10),
+            pady=5
+        )
+        lbl.pack(fill="x", pady=2)
 
+        # =============================
+        # SELECTARE LA CLICK
+        # =============================
+        def on_click(event, label=lbl, bg=culoare, row=r):
+            # reset selecție veche
+            if selected_label["widget"]:
+                selected_label["widget"].configure(bg=selected_label["bg"])
+
+            # setează selecție nouă
+            label.configure(bg="#9ecbff")
+            selected_label["widget"] = label
+            selected_label["bg"] = bg
+
+            # DEBUG / FOLOSIRE MAI DEPARTE
+            print("Selectat:", row)
+
+        lbl.bind("<Button-1>", on_click)
 
 """
 Functie pentru a aparea in pop-ul cu abonamentele ce expira sau au expirat
 """
-
-
 def alerta_abonamente_combinate():
     conn = conectare_db()
     cursor = conn.cursor()
@@ -572,6 +626,7 @@ def alerta_abonamente_combinate():
         SELECT 
             d.Nume_Firma,
             d.Cui,
+            d.Status_Firma,
             s.Serie_Amef,
             s.Data_Exp_Abon,
             s.Data_Exp_Gprs
@@ -587,6 +642,10 @@ def alerta_abonamente_combinate():
     gprs_rows = []
 
     for r in rows:
+        # filtram doar clientii activi
+        if r["Status_Firma"] in ["Inchis", "Suspendat", "Inactiv"]:
+            continue
+
         if r["Data_Exp_Abon"]:
             amef_rows.append({
                 "Nume_Firma": r["Nume_Firma"],
@@ -910,10 +969,135 @@ def actualizeaza_sediu_secundar(id_sediu, tip_abonament, data_expirare):
     conn.close()
 
 
-# --- Popup pentru prelungire abonament ---
+# --- Popup pentru prelungire abonament cu deplasare la 3 luni
+def popup_prelungire_abonament_trimestrial(id_client, id_sediu, serie_amef, data_exp_service):
+    popup= tk.Toplevel()
+    popup.title("Prelungire abonament cu deplasare")
+    popup.geometry("420x380")
+    popup.grab_set()
+
+    tk.Label(popup, text=f"Client: {id_client}", font=("Arial", 10, "bold")).pack(anchor="w", padx=10)
+    tk.Label(popup, text=f"Serie AMEF: {serie_amef}", font=("Arial", 10, "bold")).pack(anchor="w", padx=10)
+
+    # TIpul abonamentului adica cu deplasare la 3 luni buton creat numai pt a memora in istoric data deplasarii si incasarii
+    tk.Label(popup, text="Abonament deplasare trimestrial")
+    tip_var = tk.StringVar(value="SERVICE")
+
+    # --- Data start ---
+    tk.Label(popup, text="Data start prelungire").pack(pady=(10, 0))
+    cal = DateEntry(popup, date_pattern="yyyy-mm-dd")
+    cal.pack()
+
+    def seteaza_data_initiala(*args):
+        if tip_var.get() == "SERVICE" and data_exp_service:
+            cal.set_date(data_exp_service)
+    tip_var.trace_add("write", seteaza_data_initiala)
+    seteaza_data_initiala()
+
+    # --- CONFIRMA ---
+    def confirma():
+        tip = tip_var.get()
+        data_start = cal.get_date()
+        data_exp_noua = adauga_trei_luni(data_start)
+
+        conn = conectare_db()
+        cursor = conn.cursor()
+
+        # Salvează ISTORIC
+        cursor.execute("""
+                INSERT INTO istoric_abonamente
+                (id_client, id_sediu, serie_amef, tip_abonament,
+                 data_start, data_expirare, observatii)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (
+            id_client, id_sediu, serie_amef,
+            tip, data_start, data_exp_noua,
+            "Prelungire manuală"
+        ))
+
+        # update sediu secundar
+        if tip == "SERVICE":
+            cursor.execute("""
+                    UPDATE tabela_sedii_secundare
+                    SET Data_Exp_Abon=%s
+                    WHERE Id_Client=%s AND Serie_Amef=%s
+                """, (data_exp_noua, id_client, serie_amef))
+        else:
+            return
+
+        conn.commit()
+        conn.close()
+
+        messagebox.showinfo("Succes", f"{tip} prelungit până la {data_exp_noua}")
+        popup.destroy()
+        cauta_in_treeview()  # refresh tabel
+
+    tk.Button(
+        popup,
+        text="Prelungește cu 3 luni",
+        bg="#cfe2f3",
+        font=("Arial", 10, "bold"),
+        command=confirma
+    ).pack(pady=15)
+
+# Final popup prelungire 3 luni
+
+# Functie pentru prelungire 3 luni de abonament pentru clientii cu deplasare
+def adauga_trei_luni(data):
+    """
+    Primește un obiect datetime.date și returnează data cu 3 luni adăugat
+    """
+    from dateutil.relativedelta import relativedelta
+    # dacă e string, îl convertim la date
+    if isinstance(data, str):
+        try:
+            data = datetime.fromisoformat(data).date()
+        except ValueError:
+            return None  # data invalidă
+    return data + relativedelta(months=3)
+# Final functie prelungire 3 luni
+
+# Inceput functie buton prelungire 3  luni
+def buton_prelungire_3_luni():
+    selected = tree.selection()
+    if not selected:
+        messagebox.showwarning("Atenție", "Selectează un rând din tabel !")
+        return
+    row = tree.item(selected[0], "values")
+
+    id_client = row[0]
+    serie_amef = row[12]
+    data_exp_service = row[16]
+    # luăm id_sediu real
+    conn = conectare_db()
+    cursor = conn.cursor(pymysql.cursors.DictCursor)
+    cursor.execute("""
+            SELECT Nr_Crt
+            FROM tabela_sedii_secundare
+            WHERE Id_Client=%s AND Serie_Amef=%s
+        """, (id_client, serie_amef))
+    result = cursor.fetchone()
+    conn.close()
+
+    if not result:
+        messagebox.showerror("Eroare", "Sediu secundar negăsit!")
+        return
+
+    id_sediu = result["Nr_Crt"]
+
+    popup_prelungire_abonament_trimestrial(
+        id_client,
+        id_sediu,
+        serie_amef,
+        data_exp_service
+    )
+# final functie buton prelungire 3 luni
+
+
+# --- Popup pentru prelungire abonament anual ---
 def popup_prelungire_abonament(id_client, id_sediu, serie_amef, data_exp_service, data_exp_gprs):
     popup = tk.Toplevel()
-    popup.title("Prelungire abonament")
+    popup.title("Prelungire abonament anual")
     popup.geometry("420x380")
     popup.grab_set()
 
@@ -921,7 +1105,7 @@ def popup_prelungire_abonament(id_client, id_sediu, serie_amef, data_exp_service
     tk.Label(popup, text=f"Serie AMEF: {serie_amef}", font=("Arial", 10)).pack(anchor="w", padx=10)
 
     # --- Tip abonament ---
-    tk.Label(popup, text="Tip abonament").pack(pady=(10, 0))
+    tk.Label(popup, text="Tip abonament anual").pack(pady=(10, 0))
     tip_var = tk.StringVar(value="SERVICE")
     cmb = ttk.Combobox(
         popup,
@@ -990,7 +1174,7 @@ def popup_prelungire_abonament(id_client, id_sediu, serie_amef, data_exp_service
 
     tk.Button(
         popup,
-        text="Prelungește",
+        text="Prelungește abonament anual",
         bg="#cfe2f3",
         font=("Arial", 10, "bold"),
         command=confirma
@@ -1001,7 +1185,6 @@ def popup_prelungire_abonament(id_client, id_sediu, serie_amef, data_exp_service
 Functie click dublu pe un client din campul de conectare
 Si de aici la dublu click se deschide popup-ul de prelungire al abonamentului de service sau gprs
 """
-
 
 def la_double_click(event):
     selected = tree.selection()
@@ -1045,7 +1228,7 @@ def la_double_click(event):
 def buton_prelungire():
     selected = tree.selection()
     if not selected:
-        messagebox.showwarning("Atenție", "Selectează un rând din tabel!")
+        messagebox.showwarning("Atenție", "Selectează un rând din tabel !")
         return
 
     la_double_click(None)
@@ -1068,8 +1251,6 @@ def adauga_un_an(data):
 
 # Functie pentru copierea datelor cu click dreapta
 right_click_event = None  # Variabila globala pentru click dreapta
-
-
 def copy_selection(mode="cell", event=None):
     """Copiaza in clipboard celula sau randul selectat"""
     selected_items = tree.selection()
@@ -1361,6 +1542,15 @@ for i, label in enumerate(sediu_labels):
  entry_conectare_anaf, entry_tehnician, entry_data_exp, entry_val_ctr,
  entry_tip_abonament, entry_data_exp_gprs) = [entries[label] for label in sediu_labels]
 
+"""
+Pentru populare automata in functie de tip client platitor tva sau nu 
+cu deplasare sau anual
+"""
+entry_tip_abonament.bind("<KeyRelease>", actualizeaza_valoare_contract)
+entry_tva.bind("<KeyRelease>", actualizeaza_valoare_contract)
+
+
+
 # -------------------------
 # FRAME BUTOANE
 # -------------------------
@@ -1372,7 +1562,8 @@ btn_params = [
     ("Salvează client", lambda: salveaza_client(), "#cfe2f3"),
     # ("Modifică date client", lambda: modifica_date_client(), "#cfe2f3"),
     # ("Modifica Tenhician", lambda: modifica_tehnician(), "#cfe2f3"),
-    ("Prelungeste ABON", lambda: buton_prelungire(), "#cfe2f3"),
+    ("Prelungeste AB. Anual", lambda: buton_prelungire(), "#cfe2f3"),
+    ("Prelungeste 3 luni", lambda: buton_prelungire_3_luni(), "#cfe2f3"),
     ("Verifică TVA (ANAF)", lambda: webbrowser.open_new("https://www.anaf.ro/RegistruTVA/"), "#0000FF"),
     ("Abon.SRV+GPRS", lambda: alerta_abonamente_combinate(), "#ffd966"),  # galben
     ("Istoric Abonament", lambda: popup_istoric_abonamente(), "#008080"),  # verde
@@ -1391,8 +1582,6 @@ for i, (text, cmd, color) in enumerate(btn_params):
 """
 Clasa care creaza hover cu mesajele deasupra butoanelor cand trecem cu mouseul peste ele
 """
-
-
 class ToolTip:
     def __init__(self, widget, text):
         self.widget = widget
@@ -1418,8 +1607,6 @@ class ToolTip:
         if self.tip_window:
             self.tip_window.destroy()
             self.tip_window = None
-
-
 # =========================
 # Butoane + Tooltip
 # =========================
@@ -1427,6 +1614,7 @@ btn_descriptions = [
     "Caută firma folosind API-ul ANAF",
     "Salvează clientul în baza de date locală",
     "Prelungește abonamentul curent cu 1 AN",
+    "Prelungește abonamentul curent cu 3 luni",
     "Deschide site-ul ANAF pentru verificare TVA",
     "Afișează alerta cu expirarea abonamentelor",
     "Afișează istoricul abonamentelor Service si Gprs",
@@ -1488,6 +1676,7 @@ tree = ttk.Treeview(
 tree.tag_configure("expirat", background="#f28c8c")  # roșu
 tree.tag_configure("avertizare", background="#fff3b0")  # galben
 tree.tag_configure("valid", background="#d4f7d4")  # verde
+tree.tag_configure("status_inactiv", background="#808080")  # gri pentru firme inactive
 
 scroll_y.config(command=tree.yview)
 scroll_x.config(command=tree.xview)
@@ -1498,6 +1687,7 @@ tree.pack(fill="both", expand=True)
 tree.bind("<<TreeviewSelect>>",
           populare_campuri_treeview)  # cu linia asta activam functia de populare campuri cand selectam din cautare
 tree.bind("<Double-1>", la_double_click)
+search_entry.bind("<KeyRelease>", lambda e: cauta_in_treeview()) # cautare live in treeview
 
 for col in columns:
     tree.heading(col, text=col)
